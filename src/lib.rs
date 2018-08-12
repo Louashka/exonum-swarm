@@ -1,4 +1,4 @@
-#![deny(missing_debug_implementations, missing_docs, unsafe_code, bare_trait_objects)]
+#![deny(missing_debug_implementations, unsafe_code, bare_trait_objects)]
 
 #[macro_use]
 extern crate exonum;
@@ -16,26 +16,25 @@ pub mod schema {
 
 	encoding_struct! {
 		struct Voting {
-			pub_key: &PublicKey,
-			voting_id: &u64,
-			drone_id: &u8,
+			voting_id: u64,
+			drone: &PublicKey,
 			amount: u8,
 		}
 	}
 
 	encoding_struct! {
 		struct VoteAction {
-			action_id: &u64,
-			voting: &u64,
+			action_id: u64,
+			voting: u64,
 			validator: &PublicKey,
-			voting_status: &bool,
+			voting_status: bool,
 		}
 	}
 
 	impl Voting {
 		pub fn vote(self) -> Self {
 			let amount = self.amount() + 1;
-			Self::new(self.pub_key(), self.voting_id(), self.drone_id(), amount)
+			Self::new(self.voting_id(), self.drone(), amount)
 		}
 	}
 
@@ -49,12 +48,12 @@ pub mod schema {
 	        SwarmSchema { view }
 	    }
 
-	    pub fn votings(&self) -> MapIndex<&dyn Snapshot, PublicKey, Voting> {
+	    pub fn votings(&self) -> MapIndex<&dyn Snapshot, u64, Voting> {
 	        MapIndex::new("swarm.votings", self.view.as_ref())
 	    }
 
-	    pub fn voting(&self, pub_key: &PublicKey) -> Option<Voting> {
-	        self.votings().get(pub_key)
+	    pub fn voting(&self, voting_id: &u64) -> Option<Voting> {
+	        self.votings().get(voting_id)
 	    }
 
 	    /*
@@ -79,7 +78,7 @@ pub mod schema {
 	}
 
 	impl<'a> SwarmSchema<&'a mut Fork> {
-		pub fn votings_mut(&mut self) -> MapIndex<&mut Fork, PublicKey, Voting> {
+		pub fn votings_mut(&mut self) -> MapIndex<&mut Fork, u64, Voting> {
 			MapIndex::new("swarm.votings", &mut self.view)
 		}
 	}
@@ -95,16 +94,15 @@ pub mod transactions {
 			const SERVICE_ID = SERVICE_ID;
 
 			struct TxCreateVoting {
-				pub_key: &PublicKey,
-				voting_id: &u64,
-				drone_id: &u8,
+				voting_id: u64,
+				drone: &PublicKey,
 			}
 
 			struct TxVote {
-				action_id: &u32,
-				voting: &PublicKey,
+				action_id: u64,
+				voting: u64,
 				validator: &PublicKey,
-				vote_status: &bool,
+				voting_status: bool,
 				seed: u64,
 			}
 		}
@@ -153,19 +151,19 @@ pub mod contracts {
 
     impl Transaction for TxCreateVoting {
 		fn verify(&self) -> bool {
-			self.verify_signature(self.pub_key())
+			self.verify_signature(self.drone())
 		}
 
 		fn execute(&self, view: &mut Fork) -> ExecutionResult {
 			let mut schema = SwarmSchema::new(view);
-			if schema.voting(self.pub_key()).is_none() {
-				let voting = Voting::new(self.pub_key(), self.voting_id(), self.drone_id(), INIT_AMOUNT);
+			//if schema.voting(&self.voting_id()).is_none() {
+				let voting = Voting::new(self.voting_id(), self.drone(), INIT_AMOUNT);
 				println!("Create the voting: {:?}", voting);
-				schema.votings_mut().put(self.pub_key(), voting);
+				schema.votings_mut().put(&self.voting_id(), voting);
 				Ok(())
-			} else {
-				Err(Error::VotingAlreadyExists)?
-			}
+			//} else {
+				//Err(Error::VotingAlreadyExists)?
+			//}
 		}
 	}
 
@@ -177,7 +175,7 @@ pub mod contracts {
 		fn execute(&self, view: &mut Fork) -> ExecutionResult {
 			let mut schema = SwarmSchema::new(view);
 
-			let voting = match schema.voting(self.voting()) {
+			let voting = match schema.voting(&self.voting()) {
 				Some(val) => val,
 				None => Err(Error::VotingNotFound)?,
 			};
@@ -186,14 +184,15 @@ pub mod contracts {
 
 			//?????? Check if item is already voted
 
-			if self.vote_status() == &true {
+			if self.voting_status() == true {
 				let voting = voting.vote();
 				println!("Validator voted for field spraying");
 				let mut votings = schema.votings_mut();
-				votings.put(self.voting(), voting);
+				votings.put(&self.voting(), voting);
 			} else {
 				println!("Validator voted that filed is ok");
 			}
+			Ok(())
 
 		}
 	}
@@ -208,13 +207,13 @@ pub mod api {
     use schema::{SwarmSchema, Voting};
     use transactions::VoteTransactions;
 
-    #[derive(Clone)]
+    #[derive(Debug, Clone)]
 	pub struct VotingApi;
 
 	#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
     pub struct VotingQuery {
         /// Public key of the queried wallet.
-        pub pub_key: PublicKey,
+        pub voting_id: u64,
     }
 
     /// The structure returned by the REST API.
@@ -230,7 +229,7 @@ pub mod api {
             let snapshot = state.snapshot();
             let schema = SwarmSchema::new(snapshot);
             schema
-                .voting(&query.pub_key)
+                .voting(&query.voting_id)
                 .ok_or_else(|| api::Error::NotFound("\"Voting not found\"".to_owned()))
         }
 

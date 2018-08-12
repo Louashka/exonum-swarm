@@ -13,13 +13,13 @@
 // limitations under the License.
 
 extern crate exonum;
-extern crate voting;
+extern crate exonum_swarm as swarm;
 
 use exonum::blockchain::{GenesisConfig, ValidatorKeys};
 use exonum::node::{Node, NodeApiConfig, NodeConfig};
 use exonum::storage::MemoryDB;
 
-use voting::service::VotingService;
+use swarm::service::VotingService;
 
 fn node_config() -> NodeConfig {
     let (consensus_public_key, consensus_secret_key) = exonum::crypto::gen_keypair();
