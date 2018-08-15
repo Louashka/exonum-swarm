@@ -11,45 +11,41 @@ extern crate serde_json;
 
 pub mod schema {
 	use exonum::{
-		crypto::PublicKey, storage::{Fork, MapIndex, ListIndex, Snapshot},
+		 crypto::{Hash, PublicKey}, storage::{Fork, ProofListIndex, ProofMapIndex, Snapshot},
 	};
+
+	const INITIAL_AMOUNT: u8 = 0;
+
+	encoding_struct! {
+		struct VotingAction {
+	        action_id:          u64,
+	        validator:          &PublicKey,
+	        voting_status:      bool,
+	    }
+	}
 
 	encoding_struct! {
 		struct Voting {
-			voting_id: u64,
-			drone: &PublicKey,
-			amount: u8,
-		}
-	}
-
-	encoding_struct! {
-		struct VoteAction {
-			action_id: u64,
-			validator: &PublicKey,
-			voting_status: bool,
-		}
-	}
-
-	encoding_struct! {
-		struct VoteCollection {
-			voting_id: u64,
-			vector: Vec<VoteAction>,
-		}
+	        pub_key:          	&PublicKey,
+	        drone:              &PublicKey,
+	        actions:            Vec<VotingAction>,
+	        amount:             u8,
+	        history_len:        u64,
+	        history_hash:       &Hash,
+	    }
 	}
 
 	impl Voting {
-		pub fn vote(self) -> Self {
-			let amount = self.amount() + 1;
-			Self::new(self.voting_id(), self.drone(), amount)
-		}
-	}
-
-	impl VoteCollection {
-		pub fn add_action(self, action: VoteAction) -> Self {
-			let mut vector = self.vector();
-			vector.push(action);
-			Self::new(self.voting_id(), vector)
-		}
+	    pub fn set_amount(self, actions: Vec<VotingAction>, amount: u8, history_hash: &Hash) -> Self {
+	        Self::new(
+	            self.pub_key(),
+	            self.drone(),
+	            actions,
+	            amount,
+	            self.history_len() + 1,
+	            history_hash,
+	        )
+	    }
 	}
 
 	#[derive(Debug)]
@@ -57,37 +53,67 @@ pub mod schema {
 	    view: T,
 	}
 
-	impl<T: AsRef<dyn Snapshot>> SwarmSchema<T> {
+	impl<T> SwarmSchema<T>
+	where
+	    T: AsRef<dyn Snapshot>,
+	{
 	    pub fn new(view: T) -> Self {
 	        SwarmSchema { view }
 	    }
 
-	    pub fn votings(&self) -> MapIndex<&dyn Snapshot, u64, Voting> {
-	        MapIndex::new("swarm.votings", self.view.as_ref())
+	    pub fn votings(&self) -> ProofMapIndex<&T, PublicKey, Voting> {
+	        ProofMapIndex::new("swarm.votings", &self.view)
 	    }
 
-	    pub fn voting(&self, voting_id: &u64) -> Option<Voting> {
-	        self.votings().get(voting_id)
+	    pub fn voting_history(&self, pub_key: &PublicKey) -> ProofListIndex<&T, Hash> {
+	        ProofListIndex::new_in_family("swarm.voting_history", pub_key, &self.view)
 	    }
 
-	    pub fn votings_with_actions(&self) -> MapIndex<&dyn Snapshot, u64, VoteCollection> {
-	        MapIndex::new("swarm.votings_with_actions", self.view.as_ref())
+	    pub fn voting(&self, pub_key: &PublicKey) -> Option<Voting> {
+	        self.votings().get(pub_key)
 	    }
 
-	    pub fn voting_with_actions(&self, voting_id: &u64) -> Option<VoteCollection> {
-	        self.votings_with_actions().get(voting_id)
+	    pub fn state_hash(&self) -> Vec<Hash> {
+	        vec![self.votings().merkle_root()]
 	    }
-
 	}
 
 	impl<'a> SwarmSchema<&'a mut Fork> {
-		pub fn votings_mut(&mut self) -> MapIndex<&mut Fork, u64, Voting> {
-			MapIndex::new("swarm.votings", &mut self.view)
-		}
 
-		pub fn vote_collections_mut(&mut self) -> MapIndex<&mut Fork, u64, VoteCollection> {
-			MapIndex::new("swarm.votings_with_actions", &mut self.view)
-		}
+	    pub fn votings_mut(&mut self) -> ProofMapIndex<&mut Fork, PublicKey, Voting> {
+	        ProofMapIndex::new("swarm.votings", &mut self.view)
+	    }
+
+	    pub fn voting_history_mut(
+	        &mut self,
+	        pub_key: &PublicKey,
+	    ) -> ProofListIndex<&mut Fork, Hash> {
+	        ProofListIndex::new_in_family("swarm.voting_history", pub_key, &mut self.view)
+	    }
+
+	    pub fn create_voting(&mut self, key: &PublicKey, drone: &PublicKey, transaction: &Hash) {
+	        let voting = {
+	            let mut history = self.voting_history_mut(key);
+	            history.push(*transaction);
+	            let history_hash = history.merkle_root();
+	            Voting::new(key, drone, Vec::new(), INITIAL_AMOUNT, history.len(), &history_hash)
+	        };
+	        self.votings_mut().put(key, voting);
+	    }
+
+	    pub fn vote(&mut self, voting: Voting, action: VotingAction, transaction: &Hash){
+	        let voting = {
+	            let mut history = self.voting_history_mut(voting.pub_key());
+	            history.push(*transaction);
+	            let history_hash = history.merkle_root();
+	            let mut actions = voting.actions();
+	            actions.push(action);
+	            let amount = voting.amount();
+	            voting.set_amount(actions, amount + 1, &history_hash)
+	        };
+	        self.votings_mut().put(voting.pub_key(), voting.clone());
+	    }
+
 	}
 }
 
@@ -97,21 +123,21 @@ pub mod transactions {
     use service::SERVICE_ID;
 
     transactions! {
-		pub VoteTransactions {
+		pub VotingTransactions {
 			const SERVICE_ID = SERVICE_ID;
 
-			struct TxCreateVoting {
-				voting_id: u64,
-				drone: &PublicKey,
-			}
+			struct CreateVoting {
+	            pub_key:  		&PublicKey,
+	            drone:      	&PublicKey,
+	        }
 
-			struct TxVote {
-				action_id: u64,
-				voting_id: u64,
-				validator: &PublicKey,
-				voting_status: bool,
-				seed: u64,
-			}
+	        struct Vote {
+	            action_id: 		u64,
+	            pub_key: 		&PublicKey,
+	            validator: 		&PublicKey,
+	            voting_status: 	bool,
+	            seed: 			u64,
+	        }
 		}
 	}
 }
@@ -148,97 +174,84 @@ pub mod errors {
 pub mod contracts {
 	use exonum::{
         blockchain::{ExecutionResult, Transaction}, messages::Message, storage::Fork,
+        crypto::{CryptoHash},
     };
 
     use errors::Error;
-    use schema::{SwarmSchema, Voting, VoteAction, VoteCollection};
-    use transactions::{TxCreateVoting, TxVote};
+    use schema::{SwarmSchema, VotingAction};
+    use transactions::{CreateVoting, Vote};
 
-    const INIT_AMOUNT: u8 = 0;
+    impl Transaction for CreateVoting {
+	    fn verify(&self) -> bool {
+	    	true
+	        //self.verify_signature(self.drone())
+	    }
 
-    impl Transaction for TxCreateVoting {
-		fn verify(&self) -> bool {
-			//self.verify_signature(self.drone())
-			true
-		}
+	    fn execute(&self, fork: &mut Fork) -> ExecutionResult {
+	        let mut schema = SwarmSchema::new(fork);
+	        let pub_key = self.pub_key();
+	        let hash = self.hash();
 
-		fn execute(&self, view: &mut Fork) -> ExecutionResult {
-			let mut schema = SwarmSchema::new(view);
-			if schema.voting(&self.voting_id()).is_none() {
-				let voting = Voting::new(self.voting_id(), self.drone(), INIT_AMOUNT);
-				println!("Create the voting: {:?}", voting);
-				schema.votings_mut().put(&self.voting_id(), voting);
-				Ok(())
-			} else {
-				Err(Error::VotingAlreadyExists)?
-			}
-		}
+	        if schema.voting(pub_key).is_none() {
+	            let drone = self.drone();
+	            schema.create_voting(pub_key, drone, &hash);
+	            Ok(())
+	        } else {
+	            Err(Error::VotingAlreadyExists)?
+	        }
+	    }
 	}
 
-	impl Transaction for TxVote {
-		fn verify(&self) -> bool {
-			true
-			//self.verify_signature(self.validator()) //??? what signature?
-		}
+	impl Transaction for Vote {
+	    fn verify(&self) -> bool {
+	    	true
+	        //self.verify_signature(self.validator())
+	    }
 
-		fn execute(&self, view: &mut Fork) -> ExecutionResult {
-			let mut schema = SwarmSchema::new(view);
+	    fn execute(&self, fork: &mut Fork) -> ExecutionResult {
+	        let mut schema = SwarmSchema::new(fork);
 
-			let voting = match schema.voting(&self.voting_id()) {
-				Some(val) => val,
-				None => Err(Error::VotingNotFound)?,
-			};
+	        let action_id = self.action_id();
+	        let pub_key = self.pub_key();
+	        let validator = self.validator();
+	        let voting_status = self.voting_status();
+	        let hash = self.hash();
 
-			//????????? check if validator exists
+	        let voting = schema.voting(pub_key).ok_or(Error::VotingNotFound)?;
+	        let voting_actions = voting.actions();
 
-			//?????? Check if item is already voted
-			let vote_collection = match schema.voting_with_actions(&self.voting_id()) {
-				Some(val) => val,
-				None => VoteCollection::new(self.voting_id(), Vec::new()),
-			};
+	        for i in &voting_actions {
+	            if i.validator() == validator {
+	                Err(Error::ValidatorAlreadyVoted)?
+	            }
+	        }
 
-			for i in &vote_collection.vector() {
-				if i.validator() == self.validator() {
-					Err(Error::ValidatorAlreadyVoted)?;
-				}
-			}
+	        let voting_action = VotingAction::new(action_id, validator, voting_status);
 
-			let vote_action = VoteAction::new(self.action_id(), self.validator(), self.voting_status());
-			let vote_collection = vote_collection.add_action(vote_action);
-			let mut vote_collections = schema.vote_collections_mut();
-			vote_collections.put(&self.voting_id(), vote_collection);
+	        schema.vote(voting, voting_action, &hash);
 
-			/*
-			if self.voting_status() == true {
-				let voting = voting.vote();
-				println!("Validator voted for field spraying");
-				let mut votings = schema.votings_mut();
-				votings.put(&self.voting(), voting);
-			} else {
-				println!("Validator voted that filed is ok");
-			} */
-			Ok(())
-
-		}
+	        Ok(())
+	    }
 	}
 }
 
 pub mod api {
     use exonum::{
-        api::{self, ServiceApiBuilder, ServiceApiState}, blockchain::Transaction,
-        crypto::{Hash, PublicKey}, node::TransactionSend,
+        api::{self, ServiceApiBuilder, ServiceApiState},
+	    blockchain::{self, BlockProof, Transaction, TransactionSet}, crypto::{Hash, PublicKey},
+	    helpers::Height, node::TransactionSend, storage::{ListProof, MapProof},
     };
 
-    use schema::{SwarmSchema, Voting, VoteCollection};
-    use transactions::VoteTransactions;
+    use schema::{SwarmSchema, Voting};
+    use transactions::VotingTransactions;
+    use service::SERVICE_ID;
 
     #[derive(Debug, Clone)]
 	pub struct VotingApi;
 
 	#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
     pub struct VotingQuery {
-        /// Public key of the queried wallet.
-        pub voting_id: u64,
+        pub pub_key: PublicKey,
     }
 
     /// The structure returned by the REST API.
@@ -248,17 +261,38 @@ pub mod api {
         pub tx_hash: Hash,
     }
 
+    #[derive(Debug, Serialize, Deserialize)]
+	pub struct VotingProof {
+	    /// Proof to the whole database table.
+	    pub to_table: MapProof<Hash, Hash>,
+	    pub to_voting: MapProof<PublicKey, Voting>,
+	}
+
+	#[derive(Debug, Serialize, Deserialize)]
+	pub struct VotingHistory {
+	    pub proof: ListProof<Hash>,
+	    pub transactions: Vec<VotingTransactions>,
+	}
+
+	/// Wallet information.
+	#[derive(Debug, Serialize, Deserialize)]
+	pub struct VotingInfo {
+	    pub block_proof: BlockProof,
+	    pub voting_proof: VotingProof,
+	    pub voting_history: Option<VotingHistory>,
+	}
+
     impl VotingApi {
-        /// Endpoint for getting a single wallet.
+
         pub fn get_voting(state: &ServiceApiState, query: VotingQuery) -> api::Result<Voting> {
             let snapshot = state.snapshot();
             let schema = SwarmSchema::new(snapshot);
             schema
-                .voting(&query.voting_id)
+                .voting(&query.pub_key)
                 .ok_or_else(|| api::Error::NotFound("\"Voting not found\"".to_owned()))
         }
 
-        /// Endpoint for dumping all wallets from the storage.
+
         pub fn get_votings(state: &ServiceApiState, _query: ()) -> api::Result<Vec<Voting>> {
             let snapshot = state.snapshot();
             let schema = SwarmSchema::new(snapshot);
@@ -267,18 +301,57 @@ pub mod api {
             Ok(votings)
         }
 
-        pub fn get_vote_collections(state: &ServiceApiState, _query: ()) -> api::Result<Vec<VoteCollection>> {
-            let snapshot = state.snapshot();
-            let schema = SwarmSchema::new(snapshot);
-            let idx = schema.votings_with_actions();
-            let votings_with_actions = idx.values().collect();
-            Ok(votings_with_actions)
-        }
+        pub fn voting_info(state: &ServiceApiState, query: VotingQuery) -> api::Result<VotingInfo> {
+	        let snapshot = state.snapshot();
+	        let general_schema = blockchain::Schema::new(&snapshot);
+	        let swarm_schema = SwarmSchema::new(&snapshot);
+
+	        let max_height = general_schema.block_hashes_by_height().len() - 1;
+
+	        let block_proof = general_schema
+	            .block_and_precommits(Height(max_height))
+	            .unwrap();
+
+	        let to_table: MapProof<Hash, Hash> =
+	            general_schema.get_proof_to_service_table(SERVICE_ID, 0);
+
+	        let to_voting: MapProof<PublicKey, Voting> =
+	            swarm_schema.votings().get_proof(query.pub_key);
+
+	        let voting_proof = VotingProof {
+	            to_table,
+	            to_voting,
+	        };
+
+	        let voting = swarm_schema.voting(&query.pub_key);
+
+	        let voting_history = voting.map(|_| {
+	            let history = swarm_schema.voting_history(&query.pub_key);
+	            let proof = history.get_range_proof(0, history.len());
+
+	            let transactions: Vec<VotingTransactions> = history
+	                .iter()
+	                .map(|record| general_schema.transactions().get(&record).unwrap())
+	                .map(|raw| VotingTransactions::tx_from_raw(raw).unwrap())
+	                .collect::<Vec<_>>();
+
+	            VotingHistory {
+	                proof,
+	                transactions,
+	            }
+	        });
+
+	        Ok(VotingInfo {
+	            block_proof,
+	            voting_proof,
+	            voting_history,
+	        })
+	    }
 
         /// Common processing for transaction-accepting endpoints.
         pub fn post_transaction(
             state: &ServiceApiState,
-            query: VoteTransactions,
+            query: VotingTransactions,
         ) -> api::Result<TransactionResponse> {
             let transaction: Box<dyn Transaction> = query.into();
             let tx_hash = transaction.hash();
@@ -295,7 +368,7 @@ pub mod api {
                 .public_scope()
                 .endpoint("v1/voting", Self::get_voting)
                 .endpoint("v1/votings", Self::get_votings)
-                .endpoint("v1/vote_collections", Self::get_vote_collections)
+                .endpoint("v1/votings/info", Self::voting_info)
                 .endpoint_mut("v1/votings", Self::post_transaction)
                 .endpoint_mut("v1/votings/vote", Self::post_transaction);
         }
@@ -309,7 +382,7 @@ pub mod service {
     };
 
     use api::VotingApi;
-    use transactions::VoteTransactions;
+    use transactions::VotingTransactions;
 
     /// Service ID for the `Service` trait.
     pub const SERVICE_ID: u16 = 1;
@@ -331,7 +404,7 @@ pub mod service {
             &self,
             raw: RawTransaction,
         ) -> Result<Box<dyn Transaction>, encoding::Error> {
-            let tx = VoteTransactions::tx_from_raw(raw)?;
+            let tx = VotingTransactions::tx_from_raw(raw)?;
             Ok(tx.into())
         }
 
