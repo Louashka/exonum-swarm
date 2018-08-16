@@ -106,10 +106,15 @@ pub mod schema {
 	            let mut history = self.voting_history_mut(voting.pub_key());
 	            history.push(*transaction);
 	            let history_hash = history.merkle_root();
+	            
+	            let mut amount = voting.amount();
+	            if action.voting_status() {
+	            	amount = amount + 1;
+	            }
+
 	            let mut actions = voting.actions();
 	            actions.push(action);
-	            let amount = voting.amount();
-	            voting.set_amount(actions, amount + 1, &history_hash)
+	            voting.set_amount(actions, amount, &history_hash)
 	        };
 	        self.votings_mut().put(voting.pub_key(), voting.clone());
 	    }
@@ -378,48 +383,54 @@ pub mod api {
 pub mod service {
     use exonum::{
     api::ServiceApiBuilder, blockchain::{Service, Transaction, TransactionSet}, crypto::Hash,
-    encoding, messages::RawTransaction, storage::Snapshot,
+    encoding::Error as EncodingError, helpers::fabric::{self, Context}, messages::RawTransaction,
+    storage::Snapshot,
     };
 
     use api::VotingApi;
     use transactions::VotingTransactions;
+    use schema::SwarmSchema;
 
     /// Service ID for the `Service` trait.
-    pub const SERVICE_ID: u16 = 1;
+    pub const SERVICE_ID: u16 = 128;
+    pub const SERVICE_NAME: &str = "voting";
 
     #[derive(Debug)]
     pub struct VotingService;
 
     impl Service for VotingService {
-        fn service_name(&self) -> &'static str {
-            "voting"
+        fn service_name(&self) -> &str {
+            SERVICE_NAME
         }
 
         fn service_id(&self) -> u16 {
             SERVICE_ID
         }
 
-        // Implement a method to deserialize transactions coming to the node.
-        fn tx_from_raw(
-            &self,
-            raw: RawTransaction,
-        ) -> Result<Box<dyn Transaction>, encoding::Error> {
-            let tx = VotingTransactions::tx_from_raw(raw)?;
-            Ok(tx.into())
-        }
+        fn state_hash(&self, view: &dyn Snapshot) -> Vec<Hash> {
+	        let schema = SwarmSchema::new(view);
+	        schema.state_hash()
+	    }
 
-        // Hashes for the service tables that will be included into the state hash.
-        // To simplify things, we don't have [Merkelized tables][merkle] in the service storage
-        // for now, so we return an empty vector.
-        //
-        // [merkle]: https://exonum.com/doc/architecture/storage/#merklized-indices
-        fn state_hash(&self, _: &dyn Snapshot) -> Vec<Hash> {
-            vec![]
-        }
+	    fn tx_from_raw(&self, raw: RawTransaction) -> Result<Box<dyn Transaction>, EncodingError> {
+	        VotingTransactions::tx_from_raw(raw).map(Into::into)
+	    }
 
-        // Links the service api implementation to the Exonum.
-        fn wire_api(&self, builder: &mut ServiceApiBuilder) {
-            VotingApi::wire(builder);
-        }
+	    fn wire_api(&self, builder: &mut ServiceApiBuilder) {
+	        VotingApi::wire(builder);
+	    }
     }
+
+    #[derive(Debug)]
+	pub struct ServiceFactory;
+
+	impl fabric::ServiceFactory for ServiceFactory {
+	    fn service_name(&self) -> &str {
+	        SERVICE_NAME
+	    }
+
+	    fn make_service(&mut self, _: &Context) -> Box<dyn Service> {
+	        Box::new(VotingService)
+	    }
+	}
 }
