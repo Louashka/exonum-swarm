@@ -26,6 +26,6 @@ fn main() {
 
     let node = NodeBuilder::new()
         .with_service(Box::new(configuration::ServiceFactory))
-        .with_service(Box::new(swarm::service::ServiceFactory));
+        .with_service(Box::new(swarm::ServiceFactory));
     node.run();
 }
